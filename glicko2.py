@@ -22,72 +22,74 @@ DRAW = 0.5
 LOSS = 0.
 
 
-MU = 1500
-PHI = 350
-SIGMA = 0.06
-TAU = 1.0
-EPSILON = 0.000001
+DEFAULT_RATING = 1500
+DEFAULT_DEVIATION = 350
+DEFAULT_VOLATILITY = 0.06
+TAU = 1.0  # system constant
+EPSILON = 0.000001  # convergence tolerance
 #: A constant which is used to standardize the logistic function to
 #: `1/(1+exp(-x))` from `1/(1+10^(-r/400))`
 Q = math.log(10) / 400
+SCALE_FACTOR = 173.7178
 
 
 class Rating(object):
 
-    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA):
-        self.mu = mu
-        self.phi = phi
-        self.sigma = sigma
+    def __init__(self, rating=DEFAULT_RATING, deviation=DEFAULT_DEVIATION, volatility=DEFAULT_VOLATILITY):
+        self.rating = rating
+        self.deviation = deviation
+        self.volatility = volatility
 
     def __repr__(self):
         c = type(self)
-        args = (c.__module__, c.__name__, self.mu, self.phi, self.sigma)
-        return '%s.%s(mu=%.3f, phi=%.3f, sigma=%.3f)' % args
+        args = (c.__module__, c.__name__, self.rating, self.deviation, self.volatility)
+        return '%s.%s(rating=%.3f, deviation=%.3f, volatility=%.3f)' % args
 
 
 class Glicko2(object):
 
-    def __init__(self, mu=MU, phi=PHI, sigma=SIGMA, tau=TAU, epsilon=EPSILON):
-        self.mu = mu
-        self.phi = phi
-        self.sigma = sigma
+    def __init__(self, rating=DEFAULT_RATING, deviation=DEFAULT_DEVIATION, volatility=DEFAULT_VOLATILITY, tau=TAU, epsilon=EPSILON):
+        self.rating = rating
+        self.deviation = deviation
+        self.volatility = volatility
         self.tau = tau
         self.epsilon = epsilon
 
-    def create_rating(self, mu=None, phi=None, sigma=None):
-        if mu is None:
-            mu = self.mu
-        if phi is None:
-            phi = self.phi
-        if sigma is None:
-            sigma = self.sigma
-        return Rating(mu, phi, sigma)
+    def create_rating(self, rating=None, deviation=None, volatility=None):
+        if rating is None:
+            rating = self.rating
+        if deviation is None:
+            deviation = self.deviation
+        if volatility is None:
+            volatility = self.volatility
+        return Rating(rating, deviation, volatility)
 
-    def scale_down(self, rating, ratio=173.7178):
-        mu = (rating.mu - self.mu) / ratio
-        phi = rating.phi / ratio
-        return self.create_rating(mu, phi, rating.sigma)
+    def glicko_to_glicko2(self, rating, ratio=SCALE_FACTOR):
+        mu = (rating.rating - self.rating) / ratio
+        phi = rating.deviation / ratio
+        return self.create_rating(mu, phi, rating.volatility)
 
-    def scale_up(self, rating, ratio=173.7178):
-        mu = rating.mu * ratio + self.mu
-        phi = rating.phi * ratio
-        return self.create_rating(mu, phi, rating.sigma)
+    def glicko2_to_glicko(self, rating, ratio=SCALE_FACTOR):
+        mu, phi = rating.rating, rating.deviation
+        rating = mu * ratio + self.rating
+        deviation = phi * ratio
+        return self.create_rating(rating, deviation, rating.volatility)
 
     def reduce_impact(self, rating):
         """The original form is `g(RD)`. This function reduces the impact of
         games as a function of an opponent's RD.
         """
-        return 1 / math.sqrt(1 + (3 * rating.phi ** 2) / (math.pi ** 2))
+        return 1 / math.sqrt(1 + (3 * rating.deviation ** 2) / (math.pi ** 2))
 
     def expect_score(self, rating, other_rating, impact):
-        return 1. / (1 + math.exp(-impact * (rating.mu - other_rating.mu)))
+        return 1. / (1 + math.exp(-impact * (rating.rating - other_rating.rating)))
 
     def determine_sigma(self, rating, difference, variance):
         """Determines new sigma."""
-        phi = rating.phi
+        phi = rating.deviation
         difference_squared = difference ** 2
         # 1. Let a = ln(s^2), and define f(x)
-        alpha = math.log(rating.sigma ** 2)
+        alpha = math.log(rating.volatility ** 2)
         def f(x):
             """This function is twice the conditional log-posterior density of
             phi, and is the optimality criterion.
@@ -127,7 +129,7 @@ class Glicko2(object):
     def rate(self, rating, series):
         # Step 2. For each player, convert the rating and RD's onto the
         #         Glicko-2 scale.
-        rating = self.scale_down(rating)
+        rating = self.glicko_to_glicko2(rating)
         # Step 3. Compute the quantity v. This is the estimated variance of the
         #         team's/player's rating based only on game outcomes.
         # Step 4. Compute the quantity difference, the estimated improvement in
@@ -137,7 +139,7 @@ class Glicko2(object):
         variance_inv = 0
         difference = 0
         for actual_score, other_rating in series:
-            other_rating = self.scale_down(other_rating)
+            other_rating = self.glicko_to_glicko2(other_rating)
             impact = self.reduce_impact(other_rating)
             expected_score = self.expect_score(rating, other_rating, impact)
             variance_inv += impact ** 2 * expected_score * (1 - expected_score)
@@ -147,8 +149,8 @@ class Glicko2(object):
                 (Q ** 2) * (impact ** 2))
         difference /= variance_inv
         variance = 1. / variance_inv
-        denom = rating.phi ** -2 + d_square_inv
-        mu = rating.mu + Q / denom * (difference / variance_inv)
+        denom = rating.deviation ** -2 + d_square_inv
+        mu = rating.rating + Q / denom * (difference / variance_inv)
         phi = math.sqrt(1 / denom)
         # Step 5. Determine the new value, Sigma', ot the sigma. This
         #         computation requires iteration.
@@ -158,9 +160,9 @@ class Glicko2(object):
         phi_star = math.sqrt(phi ** 2 + sigma ** 2)
         # Step 7. Update the rating and RD to the new values, Mu' and Phi'.
         phi = 1 / math.sqrt(1 / phi_star ** 2 + 1 / variance)
-        mu = rating.mu + phi ** 2 * (difference / variance)
+        mu = rating.rating + phi ** 2 * (difference / variance)
         # Step 8. Convert ratings and RD's back to original scale.
-        return self.scale_up(self.create_rating(mu, phi, sigma))
+        return self.glicko2_to_glicko(self.create_rating(mu, phi, sigma))
 
     def rate_1vs1(self, rating1, rating2, drawn=False):
         return (self.rate(rating1, [(DRAW if drawn else WIN, rating2)]),
